@@ -44,6 +44,10 @@ RUN python3.9 -m venv /home/ardupilot/venv \
     && /home/ardupilot/venv/bin/pip install --no-cache-dir pymavlink dronekit dronekit-sitl pexpect future empy==3.3.4
 ENV PATH="/home/ardupilot/venv/bin:${PATH}"
 
+# tkinter for the GUI examples (own late layer so the slow ArduPilot layers above stay cached)
+RUN sudo apt-get update && sudo apt-get install -y --no-install-recommends python3.9-tk \
+    && sudo rm -rf /var/lib/apt/lists/*
+
 COPY --chown=ardupilot:ardupilot entrypoint.sh start_sitl.sh /home/ardupilot/
 RUN chmod +x /home/ardupilot/entrypoint.sh /home/ardupilot/start_sitl.sh \
     && mkdir /home/ardupilot/dronekit_examples

@@ -1,3 +1,7 @@
+import collections.abc
+collections.MutableMapping = collections.abc.MutableMapping
+collections.Mapping = collections.abc.Mapping
+
 import queue
 import threading
 import tkinter as tk
@@ -12,7 +16,11 @@ DEFAULT_TAKEOFF_ALT = 10
 PWM_MIN = 1000
 PWM_MID = 1500
 PWM_MAX = 2000
-PWM_STEP = 50
+
+# Loop rate in milliseconds (20 ms = 50 Hz, matching real RC transmitter refresh rate)
+LOOP_INTERVAL_MS = 20
+# Ramping speed: 25 µs per 20ms tick (ramps from neutral to full deflection in ~0.4s)
+RAMP_SPEED = 25
 
 
 class ControlPanel:
@@ -21,12 +29,12 @@ class ControlPanel:
         self.vehicle = None
         self.results = queue.Queue()
 
-        # Channel values: Ch1=Roll, Ch2=Pitch, Ch3=Throttle (starts at min 1000), Ch4=Yaw
+        # Channel values stored as float for sub-integer smooth interpolation
         self.rc_vals = {
-            "1": PWM_MID,
-            "2": PWM_MID,
-            "3": PWM_MIN,
-            "4": PWM_MID,
+            "1": float(PWM_MID),
+            "2": float(PWM_MID),
+            "3": float(PWM_MIN),
+            "4": float(PWM_MID),
         }
         self.pressed_keys = set()
 
@@ -91,8 +99,8 @@ class ControlPanel:
             ttk.Label(rc_frame, text=label_text, width=28, anchor="w").grid(row=i, column=0, padx=5, pady=2)
             bar = ttk.Progressbar(rc_frame, orient="horizontal", length=200, mode="determinate", maximum=1000)
             bar.grid(row=i, column=1, padx=5, pady=2)
-            bar["value"] = self.rc_vals[ch_id] - PWM_MIN
-            lbl = ttk.Label(rc_frame, text=f"{self.rc_vals[ch_id]} µs", width=8)
+            bar["value"] = int(self.rc_vals[ch_id]) - PWM_MIN
+            lbl = ttk.Label(rc_frame, text=f"{int(self.rc_vals[ch_id])} µs", width=8)
             lbl.grid(row=i, column=2, padx=5, pady=2)
             self.rc_bars[ch_id] = bar
             self.rc_labels[ch_id] = lbl
@@ -219,54 +227,46 @@ class ControlPanel:
         self.pressed_keys.discard(event.keysym.lower())
 
     def update_rc_loop(self):
-        # Throttle (W / S) - Ch 3
-        if "w" in self.pressed_keys:
-            self.rc_vals["3"] = min(PWM_MAX, self.rc_vals["3"] + PWM_STEP)
-        elif "s" in self.pressed_keys:
-            self.rc_vals["3"] = max(PWM_MIN, self.rc_vals["3"] - PWM_STEP)
+        # Dynamic ramping toward target stick deflection
+        def ramp_channel(ch, key_pos, key_neg, target_default=PWM_MID):
+            if key_pos in self.pressed_keys:
+                target = float(PWM_MAX)
+            elif key_neg in self.pressed_keys:
+                target = float(PWM_MIN)
+            else:
+                target = float(target_default)
 
-        # Yaw (A / D) - Ch 4
-        if "a" in self.pressed_keys:
-            self.rc_vals["4"] = 1300
-        elif "d" in self.pressed_keys:
-            self.rc_vals["4"] = 1700
-        else:
-            self.rc_vals["4"] = PWM_MID
+            curr = self.rc_vals[ch]
+            if curr < target:
+                self.rc_vals[ch] = min(target, curr + RAMP_SPEED)
+            elif curr > target:
+                self.rc_vals[ch] = max(target, curr - RAMP_SPEED)
 
-        # Roll (Left / Right) - Ch 1
-        if "left" in self.pressed_keys:
-            self.rc_vals["1"] = 1300
-        elif "right" in self.pressed_keys:
-            self.rc_vals["1"] = 1700
-        else:
-            self.rc_vals["1"] = PWM_MID
+        # Smooth proportional continuous control for all 4 channels
+        ramp_channel("1", "right", "left", PWM_MID)     # Roll (Ch 1) -> 1500 µs default
+        ramp_channel("2", "down", "up", PWM_MID)        # Pitch (Ch 2) -> 1500 µs default
+        ramp_channel("3", "w", "s", PWM_MIN)           # Throttle (Ch 3) -> 1000 µs default
+        ramp_channel("4", "d", "a", PWM_MID)           # Yaw (Ch 4) -> 1500 µs default
 
-        # Pitch (Up / Down) - Ch 2
-        if "up" in self.pressed_keys:
-            self.rc_vals["2"] = 1300
-        elif "down" in self.pressed_keys:
-            self.rc_vals["2"] = 1700
-        else:
-            self.rc_vals["2"] = PWM_MID
-
-        # Update visual bars
+        # Update visual progress bars and labels smoothly
         for ch, val in self.rc_vals.items():
-            self.rc_bars[ch]["value"] = val - PWM_MIN
-            self.rc_labels[ch].config(text=f"{val} µs")
+            int_val = int(round(val))
+            self.rc_bars[ch]["value"] = int_val - PWM_MIN
+            self.rc_labels[ch].config(text=f"{int_val} µs")
 
-        # Send overrides to vehicle if armed
+        # Send channel overrides to vehicle if armed
         if self.vehicle is not None:
             if self.vehicle.armed:
                 self.vehicle.channels.overrides = {
-                    "1": self.rc_vals["1"],
-                    "2": self.rc_vals["2"],
-                    "3": self.rc_vals["3"],
-                    "4": self.rc_vals["4"],
+                    "1": int(round(self.rc_vals["1"])),
+                    "2": int(round(self.rc_vals["2"])),
+                    "3": int(round(self.rc_vals["3"])),
+                    "4": int(round(self.rc_vals["4"])),
                 }
             else:
                 self.vehicle.channels.overrides = {}
 
-        self.root.after(100, self.update_rc_loop)
+        self.root.after(LOOP_INTERVAL_MS, self.update_rc_loop)
 
 
 if __name__ == "__main__":
